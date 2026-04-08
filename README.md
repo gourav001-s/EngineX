@@ -31,7 +31,7 @@
 <!-- Recommended: Take a screenshot of the tool running and place it below -->
 <!-- Format: ![EngineX Banner](assets/banner.png) -->
 
-> <img width="516" height="434" alt="Screenshot 2026-04-08 201430" src="https://github.com/user-attachments/assets/7e5948de-6502-4cb4-b8c2-df3b81280568" />
+> <img width="482" height="270" alt="image" src="https://github.com/user-attachments/assets/536f93cd-e047-425a-bff9-c81f7e698c2e" />
 
 
 
