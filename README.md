@@ -15,7 +15,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.7%2B-blue?style=flat-square&logo=python)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Kali%20%7C%20Parrot-informational?style=flat-square&logo=linux)](https://kali.org)
-[![License](https://img.shields.io/badge/License-Apache-2.0-green?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache2.0-green?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-2.0-red?style=flat-square)]()
 [![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)]()
 
