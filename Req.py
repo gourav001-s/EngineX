@@ -7,8 +7,8 @@
 ███████╗██║ ╚████║╚██████╔╝██║██║ ╚████║███████╗██╔╝ ██╗
 ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝
 
-        ⚡ EngineX v2.0 — Recon & Bug Bounty Framework ⚡
-                     Developed by RAVX
+        ⚡ EngineX v3.0 — Automated Bug Bounty Recon Framework ⚡
+                         Developed by RAVX
 """
 
 import os
@@ -25,116 +25,185 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# ─────────────────────────────────────────────
-#  DEPENDENCY BOOTSTRAP — runs before everything
-# ─────────────────────────────────────────────
-def _bootstrap_pip_packages():
-    """
-    Ensure third-party pip packages are available.
-    Installs into user site-packages so no sudo is needed.
-    Works inside virtual-envs, system Python, and externally-managed
-    Debian/Ubuntu environments (PEP 668 'externally-managed').
-    """
+# ══════════════════════════════════════════════════════════
+#  DEPENDENCY BOOTSTRAP  (runs before any third-party import)
+# ══════════════════════════════════════════════════════════
+def _bootstrap():
     required = {
-        "requests": "requests",
-        "colorama": "colorama",
-        "tqdm":     "tqdm",
+        "requests":  "requests",
+        "colorama":  "colorama",
+        "tqdm":      "tqdm",
+        "reportlab": "reportlab",
     }
-
-    # Try importing; collect what's missing
     missing = []
-    for import_name, pkg_name in required.items():
+    for imp, pkg in required.items():
         try:
-            __import__(import_name)
+            __import__(imp)
         except ImportError:
-            missing.append(pkg_name)
+            missing.append(pkg)
 
     if not missing:
-        return  # all good
+        return
 
-    print(f"[*] Auto-installing missing Python packages: {', '.join(missing)}")
-
-    # Base install command — always use --user so no sudo needed
-    base_cmd = [sys.executable, "-m", "pip", "install", "--user", "--quiet"]
-
+    print(f"[*] Auto-installing missing packages: {', '.join(missing)}")
+    base = [sys.executable, "-m", "pip", "install", "--user", "--quiet"]
     for pkg in missing:
-        cmd = base_cmd + [pkg]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            # PEP 668: externally managed env (Debian/Ubuntu 23+)
-            if "externally-managed" in result.stderr:
-                print(f"    [!] Externally-managed env detected. Retrying with --break-system-packages …")
-                cmd_ext = base_cmd + ["--break-system-packages", pkg]
-                result2 = subprocess.run(cmd_ext, capture_output=True, text=True)
-                if result2.returncode != 0:
-                    print(f"    [ERROR] Could not install {pkg}:\n{result2.stderr.strip()}")
+        r = subprocess.run(base + [pkg], capture_output=True, text=True)
+        if r.returncode != 0:
+            if "externally-managed" in r.stderr:
+                r2 = subprocess.run(
+                    base + ["--break-system-packages", pkg],
+                    capture_output=True, text=True
+                )
+                if r2.returncode != 0:
+                    print(f"[ERROR] Cannot install {pkg}:\n{r2.stderr.strip()}")
                     sys.exit(1)
             else:
-                print(f"    [ERROR] Could not install {pkg}:\n{result.stderr.strip()}")
+                print(f"[ERROR] Cannot install {pkg}:\n{r.stderr.strip()}")
                 sys.exit(1)
 
-    # Reload site-packages so the freshly installed modules are importable
-    import importlib
-    import site
+    import importlib, site
     importlib.invalidate_caches()
-    # Ensure --user site is on the path (needed when not in a venv)
-    user_site = site.getusersitepackages()
-    if user_site not in sys.path:
-        sys.path.insert(0, user_site)
+    usite = site.getusersitepackages()
+    if usite not in sys.path:
+        sys.path.insert(0, usite)
+    print("[+] All dependencies ready.\n")
 
-    print("[✓] Packages ready.\n")
+_bootstrap()
 
-_bootstrap_pip_packages()
+# ══════════════════════════════════════════════════════════
+#  THIRD-PARTY IMPORTS  (safe after bootstrap)
+# ══════════════════════════════════════════════════════════
+import requests
+from colorama import Fore, Style, init
+from tqdm import tqdm
 
-# ─────────────────────────────────────────────
-#  NOW safe to import third-party libraries
-# ─────────────────────────────────────────────
-import requests                          # noqa: E402
-from colorama import Fore, Style, init   # noqa: E402
-from tqdm import tqdm                    # noqa: E402
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                 Table, TableStyle, HRFlowable)
+from reportlab.lib.enums import TA_CENTER
 
-init(autoreset=True)  # colorama auto-reset after each print
+init(autoreset=True)
 
-# ─────────────────────────────────────────────
-#  CONFIG
-# ─────────────────────────────────────────────
-OUTPUT_DIR   = "output"
-WORDLIST_DIR = "wordlists"
-LOG_FILE     = "enginex.log"
-STATUS_FILE  = "status.txt"
-PAUSE_FILE   = "pause.flag"
+# ══════════════════════════════════════════════════════════
+#  CONSTANTS
+# ══════════════════════════════════════════════════════════
+BASE_DIR     = Path("EngineX")
 DEFAULT_RATE = 50
-TIMEOUT      = 8   # seconds for HTTP requests
-
-# ─────────────────────────────────────────────
-#  LOGGING
-# ─────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-logger = logging.getLogger("enginex")
+TIMEOUT      = 8
+PAUSE_FILE   = "pause.flag"
 
 
-# ─────────────────────────────────────────────
-#  SIGNAL HANDLER (Ctrl+C graceful exit)
-# ─────────────────────────────────────────────
-def _sig_handler(sig, frame):
-    print(f"\n{Fore.YELLOW}[!] Interrupted. Partial results saved in {OUTPUT_DIR}/")
+# ══════════════════════════════════════════════════════════
+#  WORKSPACE  ─  EngineX/<target>/
+# ══════════════════════════════════════════════════════════
+class Workspace:
+    """
+    All output goes into:
+        EngineX/
+        └── <domain>/
+            ├── subfinder.txt      subdomains
+            ├── gau.txt            passive URLs
+            ├── httpx.txt          live hosts
+            ├── katana.txt         crawled URLs
+            ├── params.txt         parameter URLs
+            ├── nuclei.txt         nuclei findings
+            ├── dalfox.txt         XSS (dalfox)
+            ├── xss.txt            XSS (reflection)
+            ├── ssrf.txt           SSRF candidates
+            ├── idor.txt           IDOR candidates
+            ├── lfi.txt            LFI hits
+            ├── redirect.txt       open redirect
+            ├── classified_*.txt   classified nuclei
+            ├── ffuf/              per-host dir fuzz
+            ├── sqlmap/            sqlmap output
+            ├── enginex.log        full execution log
+            ├── status.txt         current phase
+            └── reports/
+                ├── report.json
+                ├── report.html
+                └── report.pdf
+    """
+    def __init__(self, domain: str):
+        self.domain      = domain
+        self.root        = BASE_DIR / domain
+        self.reports_dir = self.root / "reports"
+        self.ffuf_dir    = self.root / "ffuf"
+        self.sqlmap_dir  = self.root / "sqlmap"
+        self.wl_dir      = BASE_DIR / "wordlists"
+        self._mkdirs()
+        self._init_log()
+
+    def _mkdirs(self):
+        for d in [self.root, self.reports_dir, self.ffuf_dir,
+                  self.sqlmap_dir, self.wl_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+
+    def _init_log(self):
+        log_path = self.root / "enginex.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s  %(message)s",
+            datefmt="%H:%M:%S",
+            handlers=[
+                logging.FileHandler(log_path, encoding="utf-8"),
+                logging.StreamHandler(sys.stdout),
+            ],
+        )
+        self.status_file = self.root / "status.txt"
+
+    # ── helpers ───────────────────────────────────────────
+    def f(self, name: str) -> str:
+        """Absolute path string for a named output file inside root."""
+        return str(self.root / name)
+
+    def set_status(self, s: str):
+        self.status_file.write_text(s)
+
+    def info(self, m): logging.info(Fore.CYAN   + m)
+    def ok  (self, m): logging.info(Fore.GREEN  + "[+] " + m)
+    def warn(self, m): logging.warning(Fore.YELLOW + "[!] " + m)
+    def err (self, m): logging.error(Fore.RED   + "[x] " + m)
+
+
+# ══════════════════════════════════════════════════════════
+#  MISC UTILITIES
+# ══════════════════════════════════════════════════════════
+def _sig(sig, frame):
+    print(f"\n{Fore.YELLOW}[!] Interrupted. Partial results saved.")
     sys.exit(0)
 
-signal.signal(signal.SIGINT, _sig_handler)
+signal.signal(signal.SIGINT, _sig)
 
 
-# ─────────────────────────────────────────────
+def safe_lines(fp: str) -> list:
+    p = Path(fp)
+    if not p.exists():
+        return []
+    return [l.strip() for l in p.read_text(errors="ignore").splitlines() if l.strip()]
+
+
+def run_cmd(cmd: str, ws: Workspace, rate: int = DEFAULT_RATE) -> int:
+    ws.info(f"CMD → {cmd}")
+    ret = os.system(cmd)
+    if ret != 0:
+        ws.warn(f"Exit code {ret}")
+    time.sleep(1 / max(rate, 1))
+    return ret
+
+
+def check_pause():
+    while Path(PAUSE_FILE).exists():
+        print(Fore.YELLOW + "[||] PAUSED — delete pause.flag to continue")
+        time.sleep(5)
+
+
+# ══════════════════════════════════════════════════════════
 #  BANNER
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
 def banner():
     print(Fore.CYAN + Style.BRIGHT + r"""
 ███████╗███╗   ██╗ ██████╗ ██╗███╗   ██╗███████╗██╗  ██╗
@@ -144,97 +213,45 @@ def banner():
 ███████╗██║ ╚████║╚██████╔╝██║██║ ╚████║███████╗██╔╝ ██╗
 ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝
 """)
-    print(Fore.GREEN + "        ⚡ EngineX v2.0 — Recon & Bug Bounty Framework ⚡")
-    print(Fore.WHITE + "                     Developed by RAVX\n")
-    print(Fore.YELLOW + f"[System] {platform.system()} {platform.release()} | {platform.machine()}")
-    print(Fore.YELLOW + f"[Python] {platform.python_version()}")
-    print(Fore.YELLOW + f"[Time]   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(Fore.GREEN  + Style.BRIGHT + "        ⚡ EngineX v3.0 — Bug Bounty Recon Framework ⚡")
+    print(Fore.WHITE  + "                       Developed by RAVX\n")
+    print(Fore.YELLOW + f"  [OS]     {platform.system()} {platform.release()} | {platform.machine()}")
+    print(Fore.YELLOW + f"  [Python] {platform.python_version()}")
+    print(Fore.YELLOW + f"  [Time]   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
 
-# ─────────────────────────────────────────────
-#  UTILITIES
-# ─────────────────────────────────────────────
-def log_info(msg: str):
-    logger.info(Fore.CYAN + msg)
+# ══════════════════════════════════════════════════════════
+#  TOOL SETUP
+# ══════════════════════════════════════════════════════════
+def _go_in_path():
+    gb = str(Path.home() / "go" / "bin")
+    if gb not in os.environ.get("PATH", ""):
+        os.environ["PATH"] += os.pathsep + gb
 
-def log_ok(msg: str):
-    logger.info(Fore.GREEN + "[✓] " + msg)
-
-def log_warn(msg: str):
-    logger.warning(Fore.YELLOW + "[!] " + msg)
-
-def log_err(msg: str):
-    logger.error(Fore.RED + "[✗] " + msg)
-
-def update_status(s: str):
-    Path(STATUS_FILE).write_text(s)
-
-def check_pause():
-    while Path(PAUSE_FILE).exists():
-        log_warn("PAUSED — remove pause.flag to continue")
-        time.sleep(5)
-
-def safe_read_lines(filepath: str) -> list:
-    """Return stripped non-empty lines, empty list if file missing."""
-    p = Path(filepath)
-    if not p.exists():
-        log_warn(f"File not found: {filepath}")
-        return []
-    return [l.strip() for l in p.read_text(errors="ignore").splitlines() if l.strip()]
-
-def run_cmd(cmd: str, rate: int = DEFAULT_RATE):
-    """Run a shell command with rate-limit sleep, log it."""
-    log_info(f"CMD → {cmd}")
-    ret = os.system(cmd)
-    if ret != 0:
-        log_warn(f"Command exited with code {ret}: {cmd[:80]}")
-    time.sleep(1 / max(rate, 1))
-    return ret
-
-def ensure_dirs(*dirs):
-    for d in dirs:
-        Path(d).mkdir(parents=True, exist_ok=True)
-
-
-# ─────────────────────────────────────────────
-#  GO TOOL INSTALLER
-# ─────────────────────────────────────────────
-def _go_available() -> bool:
-    return shutil.which("go") is not None
-
-def _install_go_tool(name: str, repo: str):
+def _go_tool(name: str, repo: str, ws: Workspace):
+    _go_in_path()
     if shutil.which(name):
-        log_ok(f"{name} already installed")
+        ws.ok(f"{name} already installed")
         return
-    if not _go_available():
-        log_err(f"Go not found — cannot install {name}. Install Go from https://go.dev/dl/")
+    if not shutil.which("go"):
+        ws.warn(f"Go not found — skipping {name}. Install: https://go.dev/dl/")
         return
-    log_info(f"Installing {name} via go install …")
+    ws.info(f"Installing {name} …")
     os.system(f"go install {repo}@latest")
-    # go installs to ~/go/bin — add to PATH for this process
-    go_bin = str(Path.home() / "go" / "bin")
-    if go_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] += os.pathsep + go_bin
 
-def _apt_install(pkgs: list):
-    """Install system packages; skip gracefully if apt not available."""
-    if not shutil.which("apt"):
-        log_warn("apt not found — skipping system package install. Install manually: " + ", ".join(pkgs))
+def _apt(pkgs: list, ws: Workspace):
+    if not shutil.which("apt-get"):
+        ws.warn("apt not available — install manually: " + " ".join(pkgs))
         return
-    pkgs_str = " ".join(pkgs)
-    log_info(f"apt install: {pkgs_str}")
-    os.system(f"sudo apt-get install -y -qq {pkgs_str}")
+    os.system(f"sudo apt-get install -y -qq {' '.join(pkgs)} 2>/dev/null")
 
-def _pip_install_tool(pkg: str):
-    """Install a Python CLI tool (like arjun) via pip --user."""
-    cmd = [sys.executable, "-m", "pip", "install", "--user", "--quiet", pkg]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0 and "externally-managed" in result.stderr:
-        cmd += ["--break-system-packages"]
-        subprocess.run(cmd, check=False)
+def _pip(pkg: str):
+    base = [sys.executable, "-m", "pip", "install", "--user", "--quiet", pkg]
+    r = subprocess.run(base, capture_output=True, text=True)
+    if r.returncode != 0 and "externally-managed" in r.stderr:
+        subprocess.run(base + ["--break-system-packages"], check=False)
 
-
-def setup_tools():
+def setup_tools(ws: Workspace):
     print(Fore.MAGENTA + "\n[TOOL SETUP]")
     go_tools = {
         "subfinder": "github.com/projectdiscovery/subfinder/v2/cmd/subfinder",
@@ -247,478 +264,658 @@ def setup_tools():
         "anew":      "github.com/tomnomnom/anew",
     }
     for name, repo in go_tools.items():
-        _install_go_tool(name, repo)
-
-    _pip_install_tool("arjun")
-
-    _apt_install(["nmap", "whatweb", "wafw00f", "sqlmap", "curl", "git"])
-    log_ok("Tool setup complete\n")
+        _go_tool(name, repo, ws)
+    _pip("arjun")
+    _apt(["nmap","whatweb","wafw00f","sqlmap","curl","git"], ws)
+    ws.ok("Tool setup complete\n")
 
 
-# ─────────────────────────────────────────────
-#  WORDLIST SETUP
-# ─────────────────────────────────────────────
-def setup_wordlist():
-    path = Path(WORDLIST_DIR) / "PayloadsAllTheThings"
-    if not path.exists():
-        log_info("Cloning PayloadsAllTheThings wordlist …")
-        os.system(f"git clone --quiet https://github.com/swisskyrepo/PayloadsAllTheThings.git {path}")
+def setup_wordlists(ws: Workspace):
+    pat = ws.wl_dir / "PayloadsAllTheThings"
+    if not pat.exists():
+        ws.info("Cloning PayloadsAllTheThings …")
+        os.system(f"git clone --quiet https://github.com/swisskyrepo/PayloadsAllTheThings.git {pat}")
     else:
-        log_ok("Wordlists already present")
+        ws.ok("PayloadsAllTheThings already present")
 
-    # SecLists subset (common dirs)
-    seclists_dir = Path(WORDLIST_DIR) / "SecLists-common"
-    if not seclists_dir.exists():
-        log_info("Cloning SecLists (common subset) …")
+    sl = ws.wl_dir / "SecLists-common"
+    if not sl.exists():
+        ws.info("Cloning SecLists (sparse checkout) …")
         os.system(
             f"git clone --quiet --depth 1 --filter=blob:none --sparse "
-            f"https://github.com/danielmiessler/SecLists.git {seclists_dir}"
+            f"https://github.com/danielmiessler/SecLists.git {sl}"
         )
-        os.system(
-            f"cd {seclists_dir} && git sparse-checkout set "
-            f"Discovery/Web-Content Fuzzing"
-        )
+        os.system(f"cd {sl} && git sparse-checkout set Discovery/Web-Content Fuzzing")
     else:
-        log_ok("SecLists already present")
+        ws.ok("SecLists already present")
 
 
-# ─────────────────────────────────────────────
-#  RECON
-# ─────────────────────────────────────────────
-def subdomains(domain: str, rate: int) -> str:
-    update_status("Subdomains")
-    out = f"{OUTPUT_DIR}/{domain}_subs.txt"
-    log_info(f"Subdomain enumeration → {out}")
-    run_cmd(f"subfinder -d {domain} -silent -o {out}", rate)
+# ══════════════════════════════════════════════════════════
+#  RECON PHASE
+# ══════════════════════════════════════════════════════════
+def run_subfinder(ws: Workspace, rate: int) -> str:
+    ws.set_status("subfinder")
+    out = ws.f("subfinder.txt")
+    ws.info("Running subfinder …")
+    run_cmd(f"subfinder -d {ws.domain} -silent -o {out}", ws, rate)
 
-    # Augment with gau passive domains if available
     if shutil.which("gau"):
-        tmp = f"{OUTPUT_DIR}/{domain}_gau_domains.txt"
-        run_cmd(f"gau --subs {domain} 2>/dev/null | grep -oP '^https?://[^/]+' | sort -u > {tmp}", rate)
-        if Path(tmp).exists():
-            run_cmd(f"cat {tmp} >> {out} && sort -u -o {out} {out}", rate)
-
-    count = len(safe_read_lines(out))
-    log_ok(f"Subdomains found: {count}")
-    return out
-
-
-def alive(subs_file: str, rate: int) -> str:
-    update_status("Alive check")
-    out = subs_file.replace("_subs.", "_live.")
-    log_info(f"Probing live hosts → {out}")
-    run_cmd(
-        f"httpx -l {subs_file} -rate-limit {rate} -silent "
-        f"-title -status-code -tech-detect -o {out}",
-        rate,
-    )
-    count = len(safe_read_lines(out))
-    log_ok(f"Live hosts: {count}")
-    return out
-
-
-def crawl(live_file: str, rate: int) -> str:
-    update_status("Crawling")
-    out = live_file.replace("_live.", "_urls.")
-    log_info(f"Crawling URLs → {out}")
-    run_cmd(
-        f"katana -list {live_file} -rl {rate} -silent "
-        f"-js-crawl -passive -o {out}",
-        rate,
-    )
-    count = len(safe_read_lines(out))
-    log_ok(f"URLs collected: {count}")
-    return out
-
-
-def extract_params(urls_file: str) -> str:
-    update_status("Param extraction")
-    out = urls_file.replace("_urls.", "_params.")
-    lines = safe_read_lines(urls_file)
-    param_urls = [l for l in lines if "=" in l]
-    Path(out).write_text("\n".join(param_urls) + "\n")
-    log_ok(f"Param URLs: {len(param_urls)}")
-    return out
-
-
-def dir_fuzz(live_file: str, rate: int) -> str:
-    """FFUF directory brute-force on each live host."""
-    update_status("Dir fuzzing")
-    wordlist = (
-        Path(WORDLIST_DIR)
-        / "SecLists-common"
-        / "Discovery"
-        / "Web-Content"
-        / "common.txt"
-    )
-    if not wordlist.exists():
-        log_warn("SecLists common.txt not found — skipping dir fuzz")
-        return ""
-
-    out_dir = f"{OUTPUT_DIR}/ffuf"
-    ensure_dirs(out_dir)
-    hosts = safe_read_lines(live_file)
-
-    for host in hosts[:20]:   # cap at 20 hosts to avoid runaway
-        # strip metadata added by httpx (e.g. "[200] title ...")
-        url = host.split()[0]
-        safe_name = url.replace("https://", "").replace("http://", "").replace("/", "_")
-        out = f"{out_dir}/{safe_name}.json"
+        tmp = ws.f("gau.txt")
         run_cmd(
-            f"ffuf -u {url}/FUZZ -w {wordlist} -mc 200,204,301,302,307,403 "
-            f"-t 40 -of json -o {out} -s",
-            rate,
+            f"gau --subs {ws.domain} 2>/dev/null "
+            f"| grep -oP '^https?://[^/]+' | sed 's|https://||;s|http://||' "
+            f"| sort -u > {tmp}",
+            ws, rate
         )
-    log_ok("Dir fuzzing complete")
-    return out_dir
+        if Path(tmp).exists() and safe_lines(tmp):
+            run_cmd(f"cat {tmp} >> {out} && sort -u -o {out} {out}", ws, rate)
+
+    n = len(safe_lines(out))
+    ws.ok(f"subfinder.txt — {n} subdomains")
+    return out
 
 
-# ─────────────────────────────────────────────
-#  SCANNING
-# ─────────────────────────────────────────────
-def nuclei_scan(live_file: str, rate: int) -> str:
-    update_status("Nuclei scan")
-    out = live_file.replace("_live.", "_nuclei.")
-    log_info(f"Nuclei OWASP scan → {out}")
+def run_httpx(ws: Workspace, subs: str, rate: int) -> str:
+    ws.set_status("httpx")
+    out = ws.f("httpx.txt")
+    ws.info("Running httpx …")
     run_cmd(
-        f"nuclei -l {live_file} -severity critical,high,medium "
-        f"-rate-limit {rate} -silent -o {out}",
-        rate,
+        f"httpx -l {subs} -rate-limit {rate} -silent "
+        f"-title -status-code -tech-detect -o {out}",
+        ws, rate
     )
+    ws.ok(f"httpx.txt — {len(safe_lines(out))} live hosts")
     return out
 
 
-def dalfox_scan(params_file: str, rate: int) -> str:
-    update_status("Dalfox XSS")
-    out = params_file.replace("_params.", "_dalfox.")
-    if not Path(params_file).exists() or not safe_read_lines(params_file):
-        log_warn("No param URLs for dalfox — skipping")
+def run_katana(ws: Workspace, live: str, rate: int) -> str:
+    ws.set_status("katana")
+    out = ws.f("katana.txt")
+    ws.info("Running katana …")
+    run_cmd(
+        f"katana -list {live} -rl {rate} -silent "
+        f"-js-crawl -passive -o {out}",
+        ws, rate
+    )
+    ws.ok(f"katana.txt — {len(safe_lines(out))} URLs")
+    return out
+
+
+def extract_params(ws: Workspace, urls: str) -> str:
+    ws.set_status("param extraction")
+    out = ws.f("params.txt")
+    lines = safe_lines(urls)
+    hits = [l for l in lines if "=" in l]
+    Path(out).write_text("\n".join(hits) + "\n")
+    ws.ok(f"params.txt — {len(hits)} parameter URLs")
+    return out
+
+
+def run_ffuf(ws: Workspace, live: str, rate: int):
+    ws.set_status("ffuf")
+    wl = ws.wl_dir / "SecLists-common" / "Discovery" / "Web-Content" / "common.txt"
+    if not wl.exists():
+        ws.warn("SecLists common.txt not found — skipping ffuf")
+        return
+    hosts = safe_lines(live)
+    ws.info(f"Running ffuf on {min(len(hosts),20)} hosts …")
+    for h in hosts[:20]:
+        url  = h.split()[0]
+        name = url.replace("https://","").replace("http://","").replace("/","_")
+        out  = str(ws.ffuf_dir / f"{name}.json")
+        run_cmd(
+            f"ffuf -u {url}/FUZZ -w {wl} "
+            f"-mc 200,204,301,302,307,403 -t 40 -of json -o {out} -s",
+            ws, rate
+        )
+    ws.ok("ffuf complete — results in ffuf/")
+
+
+# ══════════════════════════════════════════════════════════
+#  SCANNING PHASE
+# ══════════════════════════════════════════════════════════
+def run_nuclei(ws: Workspace, live: str, rate: int) -> str:
+    ws.set_status("nuclei")
+    out = ws.f("nuclei.txt")
+    ws.info("Running nuclei …")
+    run_cmd(
+        f"nuclei -l {live} -severity critical,high,medium "
+        f"-rate-limit {rate} -silent -o {out}",
+        ws, rate
+    )
+    ws.ok(f"nuclei.txt — {len(safe_lines(out))} findings")
+    return out
+
+
+def run_dalfox(ws: Workspace, params: str, rate: int) -> str:
+    ws.set_status("dalfox")
+    out = ws.f("dalfox.txt")
+    if not safe_lines(params):
+        ws.warn("No param URLs — skipping dalfox")
         return ""
-    log_info(f"Dalfox XSS scan → {out}")
-    run_cmd(f"dalfox file {params_file} --silence -o {out}", rate)
+    ws.info("Running dalfox …")
+    run_cmd(f"dalfox file {params} --silence -o {out}", ws, rate)
+    ws.ok(f"dalfox.txt — {len(safe_lines(out))} XSS hits")
     return out
 
 
-def sqli_scan(params_file: str):
-    """Run sqlmap on first 10 param URLs with safe defaults."""
-    update_status("SQLi scan")
-    urls = safe_read_lines(params_file)[:10]
-    if not urls:
-        log_warn("No URLs for sqlmap — skipping")
-        return
+def run_sqlmap(ws: Workspace, params: str):
+    ws.set_status("sqlmap")
     if not shutil.which("sqlmap"):
-        log_warn("sqlmap not found — skipping SQLi scan")
+        ws.warn("sqlmap not found — skipping")
         return
+    urls = safe_lines(params)[:10]
+    if not urls:
+        ws.warn("No param URLs — skipping sqlmap")
+        return
+    ws.info(f"Running sqlmap on {len(urls)} URLs …")
     for url in urls:
         check_pause()
         run_cmd(
             f"sqlmap -u '{url}' --batch --level=1 --risk=1 "
-            f"--output-dir={OUTPUT_DIR}/sqlmap --forms --crawl=1 "
-            f"--no-cast 2>/dev/null"
+            f"--output-dir={ws.sqlmap_dir} --forms --crawl=1 --no-cast 2>/dev/null",
+            ws
         )
+    ws.ok("sqlmap complete — results in sqlmap/")
 
 
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
 #  VULNERABILITY DETECTORS
-# ─────────────────────────────────────────────
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "EngineX/2.0 (Bug Bounty Recon)"})
+# ══════════════════════════════════════════════════════════
+_SESSION = requests.Session()
+_SESSION.headers.update({"User-Agent": "EngineX/3.0 (Bug Bounty Recon)"})
 
 
-def _http_get(url: str) -> Optional[requests.Response]:
+def _get(url: str) -> Optional[requests.Response]:
     try:
-        return SESSION.get(url.strip(), timeout=TIMEOUT, allow_redirects=True)
+        return _SESSION.get(url.strip(), timeout=TIMEOUT, allow_redirects=True)
     except requests.RequestException:
         return None
 
 
-def xss_scan(params_file: str) -> str:
-    update_status("XSS basic check")
-    out = params_file.replace("_params.", "_xss_basic.")
-    urls = safe_read_lines(params_file)
-    hits = []
+def _inject(url: str, value: str) -> str:
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    try:
+        p  = urlparse(url)
+        qs = parse_qs(p.query, keep_blank_values=True)
+        for k in qs:
+            qs[k] = [value]
+        return urlunparse(p._replace(query=urlencode(qs, doseq=True)))
+    except Exception:
+        return url.split("=")[0] + "=" + value
 
-    log_info(f"Basic XSS reflection check on {len(urls)} URLs …")
+
+def run_xss(ws: Workspace, params: str) -> str:
+    ws.set_status("xss")
+    out  = ws.f("xss.txt")
+    urls = safe_lines(params)
+    hits = []
+    ws.info(f"XSS reflection scan on {len(urls)} URLs …")
     for url in tqdm(urls, desc="XSS", unit="url", ncols=80):
         check_pause()
-        # Inject marker into every param value
-        test_url = ""
-        try:
-            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-            parsed = urlparse(url)
-            qs = parse_qs(parsed.query, keep_blank_values=True)
-            for key in qs:
-                qs[key] = ["RAVXSS"]
-            new_query = urlencode(qs, doseq=True)
-            test_url = urlunparse(parsed._replace(query=new_query))
-        except Exception:
-            test_url = url.split("=")[0] + "=RAVXSS"
-
-        resp = _http_get(test_url)
-        if resp and "RAVXSS" in resp.text:
-            hits.append(test_url)
-
+        r = _get(_inject(url, "RAVXSS"))
+        if r and "RAVXSS" in r.text:
+            hits.append(_inject(url, "RAVXSS"))
     Path(out).write_text("\n".join(hits) + "\n")
-    log_ok(f"Potential XSS reflections: {len(hits)}")
+    ws.ok(f"xss.txt — {len(hits)} reflection hits")
     return out
 
 
-def ssrf_scan(params_file: str) -> str:
-    update_status("SSRF check")
-    out = params_file.replace("_params.", "_ssrf.")
-    keys = {"url", "redirect", "dest", "destination", "next", "target", "path",
-            "uri", "callback", "return", "redir", "r", "link", "goto", "host"}
-    urls = safe_read_lines(params_file)
-    hits = [u for u in urls if any(k + "=" in u.lower() for k in keys)]
+def run_ssrf(ws: Workspace, params: str) -> str:
+    ws.set_status("ssrf")
+    out  = ws.f("ssrf.txt")
+    keys = {"url","redirect","dest","destination","next","target","path",
+            "uri","callback","return","redir","r","link","goto","host","fetch"}
+    urls = safe_lines(params)
+    hits = [u for u in urls if any(k+"=" in u.lower() for k in keys)]
     Path(out).write_text("\n".join(hits) + "\n")
-    log_ok(f"Potential SSRF candidates: {len(hits)}")
+    ws.ok(f"ssrf.txt — {len(hits)} candidates")
     return out
 
 
-def idor_scan(params_file: str) -> str:
-    update_status("IDOR check")
-    out = params_file.replace("_params.", "_idor.")
-    keys = {"id", "user", "uid", "account", "profile", "order", "invoice",
-            "customer", "member", "record", "num", "no"}
-    urls = safe_read_lines(params_file)
-    hits = [u for u in urls if any(k + "=" in u.lower() for k in keys)]
+def run_idor(ws: Workspace, params: str) -> str:
+    ws.set_status("idor")
+    out  = ws.f("idor.txt")
+    keys = {"id","user","uid","account","profile","order","invoice",
+            "customer","member","record","num","no","pid","userid","docid"}
+    urls = safe_lines(params)
+    hits = [u for u in urls if any(k+"=" in u.lower() for k in keys)]
     Path(out).write_text("\n".join(hits) + "\n")
-    log_ok(f"Potential IDOR candidates: {len(hits)}")
+    ws.ok(f"idor.txt — {len(hits)} candidates")
     return out
 
 
-def open_redirect_scan(params_file: str) -> str:
-    update_status("Open redirect check")
-    out = params_file.replace("_params.", "_redirect.")
-    keys = {"redirect", "next", "return", "redir", "r", "goto", "url",
-            "continue", "forward", "dest"}
-    urls = safe_read_lines(params_file)
-    hits = []
-    for url in urls:
-        lower = url.lower()
-        if not any(k + "=" in lower for k in keys):
-            continue
-        # Quick check: does injecting http://evil.com cause a redirect?
-        try:
-            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-            parsed = urlparse(url)
-            qs = parse_qs(parsed.query, keep_blank_values=True)
-            for key in list(qs.keys()):
-                if key.lower() in keys:
-                    qs[key] = ["https://evil.com"]
-            test_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
-            resp = _http_get(test_url)
-            if resp and "evil.com" in resp.url:
-                hits.append(test_url)
-        except Exception:
-            hits.append(url)   # flag for manual review
-
-    Path(out).write_text("\n".join(hits) + "\n")
-    log_ok(f"Open redirect candidates: {len(hits)}")
-    return out
-
-
-def lfi_scan(params_file: str) -> str:
-    """Lightweight LFI detection via path traversal payloads."""
-    update_status("LFI check")
-    out = params_file.replace("_params.", "_lfi.")
-    payloads = ["../../../../etc/passwd", "..%2f..%2f..%2fetc/passwd", "%2e%2e/%2e%2e/etc/passwd"]
-    keys = {"file", "path", "page", "template", "dir", "include", "inc", "view", "doc", "load"}
-    urls = safe_read_lines(params_file)
-    hits = []
+def run_lfi(ws: Workspace, params: str) -> str:
+    ws.set_status("lfi")
+    out      = ws.f("lfi.txt")
+    payloads = ["../../../../etc/passwd", "..%2f..%2f..%2fetc/passwd",
+                "%2e%2e/%2e%2e/etc/passwd", "....//....//etc/passwd"]
+    keys     = {"file","path","page","template","dir","include","inc",
+                "view","doc","load","read","document","folder","root"}
+    urls     = safe_lines(params)
+    hits     = []
     for url in tqdm(urls, desc="LFI", unit="url", ncols=80):
-        lower = url.lower()
-        if not any(k + "=" in lower for k in keys):
+        if not any(k+"=" in url.lower() for k in keys):
             continue
         check_pause()
         for pl in payloads:
-            try:
-                from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-                parsed = urlparse(url)
-                qs = parse_qs(parsed.query, keep_blank_values=True)
-                for key in list(qs.keys()):
-                    if key.lower() in keys:
-                        qs[key] = [pl]
-                test_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
-                resp = _http_get(test_url)
-                if resp and "root:" in resp.text:
-                    hits.append(test_url)
-                    break
-            except Exception:
-                pass
+            r = _get(_inject(url, pl))
+            if r and "root:" in r.text:
+                hits.append(_inject(url, pl))
+                break
     Path(out).write_text("\n".join(hits) + "\n")
-    log_ok(f"Potential LFI hits: {len(hits)}")
+    ws.ok(f"lfi.txt — {len(hits)} confirmed hits")
     return out
 
 
-# ─────────────────────────────────────────────
-#  RESULT CLASSIFIER
-# ─────────────────────────────────────────────
-VULN_KEYWORDS = {
-    "xss":  ["xss", "cross-site", "script"],
-    "sqli": ["sql", "injection", "mysql", "sqlite", "postgresql"],
-    "ssrf": ["ssrf", "server-side request"],
-    "lfi":  ["lfi", "local file", "path traversal", "directory traversal"],
-    "rce":  ["rce", "remote code", "command injection", "exec"],
-    "ssti": ["ssti", "template injection", "jinja", "twig"],
-    "idor": ["idor", "insecure direct"],
+def run_redirect(ws: Workspace, params: str) -> str:
+    ws.set_status("redirect")
+    out  = ws.f("redirect.txt")
+    keys = {"redirect","next","return","redir","r","goto","url",
+            "continue","forward","dest","location","back"}
+    urls = safe_lines(params)
+    hits = []
+    for url in urls:
+        if not any(k+"=" in url.lower() for k in keys):
+            continue
+        check_pause()
+        try:
+            test = _inject(url, "https://evil.com")
+            r    = _get(test)
+            if r and "evil.com" in r.url:
+                hits.append(test)
+            else:
+                hits.append(url)
+        except Exception:
+            hits.append(url)
+    Path(out).write_text("\n".join(hits) + "\n")
+    ws.ok(f"redirect.txt — {len(hits)} candidates")
+    return out
+
+
+# ══════════════════════════════════════════════════════════
+#  CLASSIFIER
+# ══════════════════════════════════════════════════════════
+VULN_KW = {
+    "xss":  ["xss","cross-site","script"],
+    "sqli": ["sql","injection","mysql","sqlite","postgresql"],
+    "ssrf": ["ssrf","server-side request"],
+    "lfi":  ["lfi","local file","path traversal","directory traversal"],
+    "rce":  ["rce","remote code","command injection","exec"],
+    "ssti": ["ssti","template injection","jinja","twig"],
+    "idor": ["idor","insecure direct"],
 }
 
-def classify(nuclei_file: str):
+def classify(ws: Workspace, nuclei_file: str):
     if not Path(nuclei_file).exists():
         return
-    lines = safe_read_lines(nuclei_file)
-    cats = {k: [] for k in VULN_KEYWORDS}
+    lines = safe_lines(nuclei_file)
+    cats  = {k: [] for k in VULN_KW}
     for line in lines:
         low = line.lower()
-        for cat, kws in VULN_KEYWORDS.items():
+        for cat, kws in VULN_KW.items():
             if any(kw in low for kw in kws):
                 cats[cat].append(line)
                 break
     for cat, findings in cats.items():
         if findings:
-            fpath = f"{OUTPUT_DIR}/classified_{cat}.txt"
-            Path(fpath).write_text("\n".join(findings) + "\n")
-            log_ok(f"  {cat.upper()}: {len(findings)} finding(s) → {fpath}")
+            fp = ws.f(f"classified_{cat}.txt")
+            Path(fp).write_text("\n".join(findings) + "\n")
+            ws.ok(f"classified_{cat}.txt — {len(findings)} finding(s)")
 
 
-# ─────────────────────────────────────────────
-#  REPORT GENERATOR
-# ─────────────────────────────────────────────
-def generate_report(domain: str, artifacts: dict) -> str:
-    """Write a structured JSON report + a human-readable Markdown summary."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_report = f"{OUTPUT_DIR}/{domain}_{ts}_report.json"
-    md_report   = f"{OUTPUT_DIR}/{domain}_{ts}_report.md"
-
-    # Count findings per category
-    summary = {}
-    for key, filepath in artifacts.items():
-        if filepath and Path(filepath).exists():
-            summary[key] = len(safe_read_lines(filepath))
-        else:
-            summary[key] = 0
-
-    full = {
-        "meta": {
-            "tool": "EngineX v2.0",
-            "domain": domain,
-            "timestamp": datetime.now().isoformat(),
-        },
-        "artifacts": artifacts,
-        "summary": summary,
+# ══════════════════════════════════════════════════════════
+#  COLLECT STATS
+# ══════════════════════════════════════════════════════════
+def _stats(ws: Workspace, artifacts: dict) -> dict:
+    return {
+        k: len(safe_lines(fp)) if fp and Path(fp).exists() else 0
+        for k, fp in artifacts.items()
     }
-    Path(json_report).write_text(json.dumps(full, indent=2))
-
-    # Markdown
-    md_lines = [
-        f"# EngineX v2.0 Report — {domain}",
-        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "",
-        "## Summary",
-        "| Category | Count |",
-        "|----------|-------|",
-    ]
-    for k, v in summary.items():
-        md_lines.append(f"| {k} | {v} |")
-
-    md_lines += [
-        "",
-        "## Artifact Paths",
-    ]
-    for k, v in artifacts.items():
-        md_lines.append(f"- **{k}**: `{v}`")
-
-    Path(md_report).write_text("\n".join(md_lines) + "\n")
-
-    log_ok(f"JSON report  → {json_report}")
-    log_ok(f"MD  report   → {md_report}")
-    return json_report
 
 
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+#  REPORT — JSON
+# ══════════════════════════════════════════════════════════
+def write_json(ws: Workspace, artifacts: dict, stats: dict) -> str:
+    out = str(ws.reports_dir / "report.json")
+    Path(out).write_text(json.dumps({
+        "meta": {
+            "tool":      "EngineX v3.0",
+            "domain":    ws.domain,
+            "timestamp": datetime.now().isoformat(),
+            "system":    f"{platform.system()} {platform.release()}",
+        },
+        "summary":   stats,
+        "artifacts": artifacts,
+    }, indent=2))
+    ws.ok(f"report.json  → {out}")
+    return out
+
+
+# ══════════════════════════════════════════════════════════
+#  REPORT — HTML
+# ══════════════════════════════════════════════════════════
+def write_html(ws: Workspace, artifacts: dict, stats: dict) -> str:
+    out = str(ws.reports_dir / "report.html")
+    ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = ""
+    for key, count in stats.items():
+        col = ("#2ecc71" if count == 0 else
+               "#e74c3c" if count > 5 else "#f39c12")
+        rows += (f"<tr><td>{key.replace('_',' ').title()}</td>"
+                 f"<td><span class='badge' style='background:{col}'>{count}</span></td>"
+                 f"<td>{artifacts.get(key,'—')}</td></tr>")
+
+    sections = ""
+    for key, fp in artifacts.items():
+        if not fp or not Path(fp).exists():
+            continue
+        lines = safe_lines(fp)
+        if not lines:
+            continue
+        items = "".join(
+            f"<li><code>{l.replace('&','&amp;').replace('<','&lt;')}</code></li>"
+            for l in lines[:100]
+        )
+        note = (f"<p class='note'>Showing first 100 of {len(lines)} results.</p>"
+                if len(lines) > 100 else "")
+        sections += (f"<div class='section'>"
+                     f"<h2>&#128196; {key.replace('_',' ').title()}</h2>"
+                     f"{note}<ul>{items}</ul></div>")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>EngineX v3.0 &mdash; {ws.domain}</title>
+<style>
+:root{{--bg:#0d1117;--card:#161b22;--border:#30363d;--accent:#58a6ff;
+      --text:#c9d1d9;--muted:#8b949e;}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);padding:2rem}}
+h1{{font-size:2rem;color:var(--accent);margin-bottom:.3rem}}
+h2{{font-size:1.15rem;color:var(--accent);margin-bottom:.8rem}}
+.meta{{color:var(--muted);font-size:.85rem;margin-bottom:2rem}}
+.card,.section{{background:var(--card);border:1px solid var(--border);
+               border-radius:8px;padding:1.5rem;margin-bottom:1.5rem}}
+table{{width:100%;border-collapse:collapse}}
+th,td{{padding:.55rem 1rem;border-bottom:1px solid var(--border);
+       text-align:left;font-size:.88rem}}
+th{{color:var(--muted);font-weight:600}}
+.badge{{display:inline-block;padding:2px 10px;border-radius:12px;
+        color:#fff;font-weight:700;font-size:.78rem}}
+ul{{list-style:none;padding:0}}
+li{{padding:3px 0;border-bottom:1px solid var(--border);font-size:.8rem}}
+code{{color:#79c0ff;font-family:monospace;word-break:break-all}}
+.note{{color:var(--muted);font-size:.78rem;margin-bottom:.7rem}}
+.banner{{font-family:monospace;color:#58a6ff;font-size:.5rem;
+         line-height:1.2;margin-bottom:1.5rem;white-space:pre}}
+.footer{{text-align:center;color:var(--muted);font-size:.78rem}}
+</style>
+</head>
+<body>
+<div class="banner">
+&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2563;&#x2588;&#x2588;&#x2588;&#x2557;   &#x2588;&#x2588;&#x2557; &#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2557; &#x2588;&#x2588;&#x2557;&#x2588;&#x2588;&#x2588;&#x2557;   &#x2588;&#x2588;&#x2557;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2563;&#x2588;&#x2588;&#x2557;  &#x2588;&#x2588;&#x2557;
+&#x2588;&#x2588;&#x2554;&#x2550;&#x2550;&#x2550;&#x2550;&#x255D;&#x2588;&#x2588;&#x2588;&#x2588;&#x2557;  &#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2554;&#x2550;&#x2550;&#x2550;&#x2550;&#x255D; &#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2588;&#x2588;&#x2557;  &#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2554;&#x2550;&#x2550;&#x2550;&#x2550;&#x255D;&#x255A;&#x2588;&#x2588;&#x2557;&#x2588;&#x2588;&#x2554;&#x255D;
+&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2557;  &#x2588;&#x2588;&#x2554;&#x2588;&#x2588;&#x2557; &#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2551;  &#x2588;&#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2554;&#x2588;&#x2588;&#x2557; &#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2557;   &#x255A;&#x2588;&#x2588;&#x2588;&#x2554;&#x255D;
+&#x2588;&#x2588;&#x2554;&#x2550;&#x2550;&#x255D;  &#x2588;&#x2588;&#x2551;&#x255A;&#x2588;&#x2588;&#x2557;&#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2551;   &#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2551;&#x255A;&#x2588;&#x2588;&#x2557;&#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2554;&#x2550;&#x2550;&#x255D;   &#x2588;&#x2588;&#x2554;&#x2588;&#x2588;&#x2557;
+&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2563;&#x2588;&#x2588;&#x2551; &#x255A;&#x2588;&#x2588;&#x2588;&#x2588;&#x2551;&#x255A;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2554;&#x255D;&#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2551; &#x255A;&#x2588;&#x2588;&#x2588;&#x2588;&#x2551;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2563;&#x2588;&#x2588;&#x2554;&#x255D; &#x2588;&#x2588;&#x2557;
+&#x255A;&#x2550;&#x2550;&#x2550;&#x2550;&#x2550;&#x2550;&#x255D;&#x255A;&#x2550;&#x255D;  &#x255A;&#x2550;&#x2550;&#x2550;&#x255D; &#x255A;&#x2550;&#x2550;&#x2550;&#x2550;&#x2550;&#x255D; &#x255A;&#x2550;&#x255D;&#x255A;&#x2550;&#x255D;  &#x255A;&#x2550;&#x2550;&#x2550;&#x255D;&#x255A;&#x2550;&#x2550;&#x2550;&#x2550;&#x2550;&#x2550;&#x255D;&#x255A;&#x2550;&#x255D;  &#x255A;&#x2550;&#x255D;
+</div>
+<h1>&#x26A1; EngineX v3.0 &mdash; Scan Report</h1>
+<div class="meta">
+  <strong>Target:</strong> {ws.domain} &nbsp;|&nbsp;
+  <strong>Generated:</strong> {ts} &nbsp;|&nbsp;
+  <strong>Tool:</strong> EngineX v3.0 by RAVX
+</div>
+<div class="card">
+  <h2>&#128202; Findings Summary</h2>
+  <table>
+    <thead><tr><th>Category</th><th>Count</th><th>Output File</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+{sections}
+<div class="card footer">
+  Generated by <strong>EngineX v3.0</strong> &mdash; Developed by RAVX<br/>
+  For authorized security testing only.
+</div>
+</body></html>"""
+
+    Path(out).write_text(html)
+    ws.ok(f"report.html  → {out}")
+    return out
+
+
+# ══════════════════════════════════════════════════════════
+#  REPORT — PDF
+# ══════════════════════════════════════════════════════════
+def write_pdf(ws: Workspace, artifacts: dict, stats: dict) -> str:
+    out = str(ws.reports_dir / "report.pdf")
+    ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    DARK   = colors.HexColor("#0d1117")
+    CARD   = colors.HexColor("#161b22")
+    ACCENT = colors.HexColor("#58a6ff")
+    GREEN  = colors.HexColor("#2ecc71")
+    RED    = colors.HexColor("#e74c3c")
+    YELLOW = colors.HexColor("#f39c12")
+    MUTED  = colors.HexColor("#8b949e")
+    WHITE  = colors.white
+    CODE_C = colors.HexColor("#79c0ff")
+    BORDER = colors.HexColor("#30363d")
+
+    doc = SimpleDocTemplate(
+        out, pagesize=letter,
+        leftMargin=0.75*inch, rightMargin=0.75*inch,
+        topMargin=0.75*inch,  bottomMargin=0.75*inch,
+        title=f"EngineX v3.0 — {ws.domain}", author="RAVX"
+    )
+    styles = getSampleStyleSheet()
+
+    S_TITLE = ParagraphStyle("etitle", fontSize=20, textColor=ACCENT,
+                              spaceAfter=4, fontName="Helvetica-Bold")
+    S_META  = ParagraphStyle("emeta",  fontSize=9,  textColor=MUTED,
+                              spaceAfter=14)
+    S_H2    = ParagraphStyle("eh2",    fontSize=12, textColor=ACCENT,
+                              spaceBefore=14, spaceAfter=6,
+                              fontName="Helvetica-Bold")
+    S_CODE  = ParagraphStyle("ecode",  fontSize=7,  textColor=CODE_C,
+                              backColor=CARD, leading=10, leftIndent=6,
+                              fontName="Courier")
+    S_NOTE  = ParagraphStyle("enote",  fontSize=8,  textColor=MUTED,
+                              spaceAfter=4)
+    S_FOOT  = ParagraphStyle("efoot",  fontSize=7,  textColor=MUTED,
+                              alignment=TA_CENTER, spaceBefore=10)
+
+    def dark_bg(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(DARK)
+        canvas.rect(0, 0, letter[0], letter[1], fill=1, stroke=0)
+        canvas.restoreState()
+
+    story = []
+
+    story.append(Paragraph("EngineX v3.0 — Scan Report", S_TITLE))
+    story.append(Paragraph(
+        f"Target: {ws.domain}  |  Generated: {ts}  |  Tool: EngineX v3.0 by RAVX",
+        S_META
+    ))
+    story.append(HRFlowable(width="100%", thickness=1,
+                            color=ACCENT, spaceAfter=14))
+
+    # Summary table
+    story.append(Paragraph("Findings Summary", S_H2))
+    tdata = [["Category", "Count", "Output File"]]
+    for key, count in stats.items():
+        c = RED if count > 5 else (YELLOW if count > 0 else GREEN)
+        tdata.append([
+            key.replace("_"," ").title(),
+            str(count),
+            str(artifacts.get(key,"—"))[:55]
+        ])
+    tbl = Table(tdata, colWidths=[2.2*inch, 0.8*inch, 4.0*inch], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",     (0,0), (-1,0),  ACCENT),
+        ("TEXTCOLOR",      (0,0), (-1,0),  DARK),
+        ("FONTNAME",       (0,0), (-1,0),  "Helvetica-Bold"),
+        ("FONTSIZE",       (0,0), (-1,-1), 8),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [DARK, CARD]),
+        ("TEXTCOLOR",      (0,1), (-1,-1), WHITE),
+        ("GRID",           (0,0), (-1,-1), 0.3, BORDER),
+        ("TOPPADDING",     (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING",  (0,0), (-1,-1), 5),
+        ("LEFTPADDING",    (0,0), (-1,-1), 6),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 18))
+
+    # Artifact sections
+    for key, fp in artifacts.items():
+        if not fp or not Path(fp).exists():
+            continue
+        lines = safe_lines(fp)
+        if not lines:
+            continue
+        story.append(Paragraph(key.replace("_"," ").title(), S_H2))
+        story.append(HRFlowable(width="100%", thickness=0.4,
+                                color=BORDER, spaceAfter=5))
+        if len(lines) > 80:
+            story.append(Paragraph(
+                f"Showing first 80 of {len(lines)} results — see {fp} for full output.",
+                S_NOTE
+            ))
+        for line in lines[:80]:
+            safe = (line.replace("&","&amp;")
+                       .replace("<","&lt;")
+                       .replace(">","&gt;"))
+            story.append(Paragraph(safe, S_CODE))
+            story.append(Spacer(1, 1))
+        story.append(Spacer(1, 8))
+
+    story.append(HRFlowable(width="100%", thickness=1,
+                            color=ACCENT, spaceBefore=8))
+    story.append(Paragraph(
+        "Generated by EngineX v3.0 — Developed by RAVX | "
+        "For authorized security testing only.",
+        S_FOOT
+    ))
+
+    doc.build(story, onFirstPage=dark_bg, onLaterPages=dark_bg)
+    ws.ok(f"report.pdf   → {out}")
+    return out
+
+
+# ══════════════════════════════════════════════════════════
 #  MAIN
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(
-        description="EngineX v2.0 — Automated Bug Bounty Recon Framework",
+        description="EngineX v3.0 — Automated Bug Bounty Recon Framework",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-d", "--domain",    required=True, help="Target domain (e.g. example.com)")
-    parser.add_argument("-r", "--rate",      type=int, default=DEFAULT_RATE, help="Requests per second (default: 50)")
-    parser.add_argument("--skip-install",    action="store_true", help="Skip tool installation")
-    parser.add_argument("--skip-wordlists",  action="store_true", help="Skip wordlist download")
-    parser.add_argument("--no-fuzz",         action="store_true", help="Skip FFUF directory fuzzing")
-    parser.add_argument("--no-sqli",         action="store_true", help="Skip sqlmap scan")
-    parser.add_argument("--bg",              action="store_true", help="Run in background with nohup")
+    parser.add_argument("-d","--domain",    required=True,
+                        help="Target domain e.g. example.com")
+    parser.add_argument("-r","--rate",      type=int, default=DEFAULT_RATE,
+                        help="Requests/sec (default 50)")
+    parser.add_argument("--skip-install",   action="store_true",
+                        help="Skip tool installation")
+    parser.add_argument("--skip-wordlists", action="store_true",
+                        help="Skip wordlist download")
+    parser.add_argument("--no-fuzz",        action="store_true",
+                        help="Skip FFUF directory fuzzing")
+    parser.add_argument("--no-sqli",        action="store_true",
+                        help="Skip sqlmap scan")
+    parser.add_argument("--bg",             action="store_true",
+                        help="Run in background (nohup)")
     args = parser.parse_args()
 
-    # ── Background mode ──────────────────────────────────────────────
     if args.bg:
+        BASE_DIR.mkdir(exist_ok=True)
+        bg_log = BASE_DIR / f"{args.domain}_bg.log"
         cmd = ["nohup", sys.executable, __file__] + [
             a for a in sys.argv[1:] if a != "--bg"
         ]
-        subprocess.Popen(cmd, stdout=open("enginex_bg.log", "w"), stderr=subprocess.STDOUT)
-        print(f"[*] EngineX launched in background. Logs → enginex_bg.log")
+        subprocess.Popen(cmd,
+                         stdout=open(bg_log, "w"),
+                         stderr=subprocess.STDOUT)
+        print(f"[*] EngineX running in background — tail -f {bg_log}")
         sys.exit(0)
 
-    # ── Bootstrap ────────────────────────────────────────────────────
     banner()
-    ensure_dirs(OUTPUT_DIR, WORDLIST_DIR)
+
+    ws = Workspace(args.domain)
+    ws.info(f"Workspace  →  {ws.root.resolve()}")
+    ws.info(f"Target: {args.domain}  |  Rate: {args.rate} req/s\n")
 
     if not args.skip_install:
-        setup_tools()
+        setup_tools(ws)
     if not args.skip_wordlists:
-        setup_wordlist()
+        setup_wordlists(ws)
 
     rate = args.rate
-    domain = args.domain
 
-    log_info(f"Target: {domain}  |  Rate: {rate} req/s\n")
-
-    # ── Recon ─────────────────────────────────────────────────────────
-    subs_file   = subdomains(domain, rate)
-    live_file   = alive(subs_file, rate)
-    urls_file   = crawl(live_file, rate)
-    params_file = extract_params(urls_file)
-
+    # ── RECON ──────────────────────────────────────────────
+    subs   = run_subfinder(ws, rate)
+    live   = run_httpx(ws, subs, rate)
+    urls   = run_katana(ws, live, rate)
+    params = extract_params(ws, urls)
     if not args.no_fuzz:
-        dir_fuzz(live_file, rate)
+        run_ffuf(ws, live, rate)
 
-    # ── Scanning ──────────────────────────────────────────────────────
-    nuclei_file  = nuclei_scan(live_file, rate)
-    dalfox_file  = dalfox_scan(params_file, rate)
-
+    # ── SCANNING ───────────────────────────────────────────
+    nuclei = run_nuclei(ws, live, rate)
+    dalfox = run_dalfox(ws, params, rate)
     if not args.no_sqli:
-        sqli_scan(params_file)
+        run_sqlmap(ws, params)
 
-    # ── Detectors ─────────────────────────────────────────────────────
-    xss_file      = xss_scan(params_file)
-    ssrf_file     = ssrf_scan(params_file)
-    idor_file     = idor_scan(params_file)
-    redirect_file = open_redirect_scan(params_file)
-    lfi_file      = lfi_scan(params_file)
+    # ── DETECTORS ──────────────────────────────────────────
+    xss      = run_xss(ws, params)
+    ssrf     = run_ssrf(ws, params)
+    idor     = run_idor(ws, params)
+    lfi      = run_lfi(ws, params)
+    redirect = run_redirect(ws, params)
 
-    # ── Classify & Report ─────────────────────────────────────────────
-    classify(nuclei_file)
+    # ── CLASSIFY ───────────────────────────────────────────
+    classify(ws, nuclei)
 
+    # ── REPORTS ────────────────────────────────────────────
     artifacts = {
-        "subdomains":    subs_file,
-        "live_hosts":    live_file,
-        "urls":          urls_file,
-        "params":        params_file,
-        "nuclei":        nuclei_file,
-        "dalfox_xss":    dalfox_file,
-        "xss_basic":     xss_file,
-        "ssrf":          ssrf_file,
-        "idor":          idor_file,
-        "open_redirect": redirect_file,
-        "lfi":           lfi_file,
+        "subdomains":    subs,
+        "live_hosts":    live,
+        "katana_urls":   urls,
+        "params":        params,
+        "nuclei":        nuclei,
+        "dalfox_xss":    dalfox,
+        "xss_basic":     xss,
+        "ssrf":          ssrf,
+        "idor":          idor,
+        "lfi":           lfi,
+        "open_redirect": redirect,
     }
+    stats = _stats(ws, artifacts)
 
-    generate_report(domain, artifacts)
+    print(Fore.MAGENTA + "\n[GENERATING REPORTS]")
+    json_r = write_json(ws, artifacts, stats)
+    html_r = write_html(ws, artifacts, stats)
+    pdf_r  = write_pdf(ws, artifacts, stats)
 
-    print(Fore.GREEN + Style.BRIGHT + "\n🔥 EngineX v2.0 — Scan Complete!\n")
+    print(Fore.GREEN + Style.BRIGHT + f"""
+╔══════════════════════════════════════════════════════════╗
+║         ⚡  EngineX v3.0 — SCAN COMPLETE  ⚡             ║
+╠══════════════════════════════════════════════════════════╣
+║  Target    : {args.domain:<42} ║
+║  Workspace : EngineX/{args.domain:<36} ║
+╠══════════════════════════════════════════════════════════╣
+║  REPORTS                                                 ║
+║  ├─ reports/report.json                                  ║
+║  ├─ reports/report.html                                  ║
+║  └─ reports/report.pdf                                   ║
+╚══════════════════════════════════════════════════════════╝
+""")
 
 
 if __name__ == "__main__":
